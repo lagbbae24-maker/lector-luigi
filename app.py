@@ -1,168 +1,117 @@
 import streamlit as st
 import PyPDF2
+from pdf2image import convert_from_bytes
 from PIL import Image
 import pytesseract
 import edge_tts
 import asyncio
 import tempfile
-import base64
+import io
 
-# Configuración de página ancha para ver mejor el PDF
-st.set_page_config(page_title="Lector Luigi Pro", page_icon="🧠", layout="wide")
+# Configuración
+st.set_page_config(page_title="Lector Luigi Móvil", page_icon="📱", layout="centered")
 
-st.title("🧠 Lector Luigi: Vista Profesional")
+st.title("📱 Lector Luigi: Versión Móvil")
+st.write("Visualización garantizada en celular y voces humanas.")
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("🎛️ Configuración")
+    st.header("Configuración")
     
-    # 1. Selector de Voz
-    st.subheader("1. Elige la Voz")
+    # Selector de Voz
     opcion_voz = st.selectbox(
-        "Narrador:",
+        "Elige la Voz:",
         [
-            ("es-VE-SebastianNeural", "Sebastián (Hombre - Venezuela)"),
-            ("es-MX-DaliaNeural", "Dalia (Mujer - México)"),
-            ("es-AR-TomasNeural", "Tomás (Hombre - Argentina)"),
-            ("es-ES-AlvaroNeural", "Álvaro (Hombre - España)")
+            ("es-VE-SebastianNeural", "Sebastián (Venezolano)"),
+            ("es-MX-DaliaNeural", "Dalia (Mexicana)"),
+            ("es-AR-TomasNeural", "Tomás (Argentino)"),
+            ("es-ES-AlvaroNeural", "Álvaro (Español)")
         ],
         format_func=lambda x: x[1]
     )
     voz_elegida = opcion_voz[0]
 
-    st.divider()
-
-    # 2. Selector de Modo
-    modo_lectura = st.radio(
-        "Modo de Lectura",
-        ["Página por página", "Lectura Continua"],
-        index=0
-    )
-    
-    st.info("ℹ️ Nota: El resaltado 'Karaoke' no es posible en esta versión web, pero aquí puedes ver el documento original para seguir la lectura.")
-
 # --- FUNCIONES ---
-
-# Función para mostrar el PDF visualmente
-def mostrar_pdf_visual(file_obj):
-    base64_pdf = base64.b64encode(file_obj.read()).decode('utf-8')
-    # Volvemos el puntero al inicio para que PyPDF2 lo pueda leer después
-    file_obj.seek(0) 
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
-
 async def generar_audio(texto, voz):
-    if not texto.strip():
-        return None
+    if not texto.strip(): return None
     comunicador = edge_tts.Communicate(texto, voz)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         await comunicador.save(fp.name)
         return fp.name
 
-# --- INTERFAZ PRINCIPAL (Columnas) ---
-
-col_izq, col_der = st.columns([1, 1]) # Mitad y Mitad
-
-# Cargador de Archivo (Arriba de las columnas)
-archivo = st.file_uploader("📂 Sube PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
+# --- APP PRINCIPAL ---
+archivo = st.file_uploader("📂 Sube tu PDF o Foto", type=["pdf", "png", "jpg", "jpeg"])
 
 if archivo is not None:
-    tipo_archivo = archivo.type
-    
-    # --- COLUMNA IZQUIERDA: EL DOCUMENTO VISUAL ---
-    with col_izq:
-        st.subheader("📄 Tu Documento")
-        if "pdf" in tipo_archivo:
-            mostrar_pdf_visual(archivo)
-        else:
-            imagen = Image.open(archivo)
-            st.image(imagen, use_container_width=True)
-
-    # --- COLUMNA DERECHA: EL AUDIO Y TEXTO ---
-    with col_der:
-        st.subheader("🎧 Reproductor")
+    # 1. ES UN PDF
+    if "pdf" in archivo.type:
+        # Leemos el archivo para texto y para imagen
+        archivo_bytes = archivo.read() 
+        lector_pdf = PyPDF2.PdfReader(io.BytesIO(archivo_bytes))
+        total_paginas = len(lector_pdf.pages)
         
-        # ==============================
-        # CASO PDF - LÓGICA DE AUDIO
-        # ==============================
-        if "pdf" in tipo_archivo:
-            lector_pdf = PyPDF2.PdfReader(archivo)
-            total_paginas = len(lector_pdf.pages)
+        st.info(f"📘 Libro de {total_paginas} páginas")
+
+        # Control de navegación
+        if 'pagina_actual' not in st.session_state: st.session_state.pagina_actual = 0
+        
+        # Botones grandes para celular
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c1:
+            if st.button("⬅️"):
+                if st.session_state.pagina_actual > 0:
+                    st.session_state.pagina_actual -= 1
+                    st.rerun()
+        with c3:
+            if st.button("➡️"):
+                if st.session_state.pagina_actual < total_paginas - 1:
+                    st.session_state.pagina_actual += 1
+                    st.rerun()
+        
+        with c2:
+            st.write(f"Pág **{st.session_state.pagina_actual + 1}** de {total_paginas}")
+
+        # --- VISUALIZACIÓN (La magia para que se vea en celular) ---
+        with st.spinner("Cargando imagen de la página..."):
+            try:
+                # Convertimos SOLO la página actual a imagen
+                # poppler_path=None asume que está en el PATH del sistema (packages.txt)
+                imagenes = convert_from_bytes(
+                    archivo_bytes, 
+                    first_page=st.session_state.pagina_actual + 1, 
+                    last_page=st.session_state.pagina_actual + 1
+                )
+                if imagenes:
+                    st.image(imagenes[0], caption=f"Página {st.session_state.pagina_actual + 1}", use_container_width=True)
+            except Exception as e:
+                st.error("No se pudo visualizar la imagen. Verifica que 'poppler-utils' esté en packages.txt")
+
+        # --- LECTURA ---
+        try:
+            pagina_obj = lector_pdf.pages[st.session_state.pagina_actual]
+            texto = pagina_obj.extract_text()
             
-            # --- MODO 1: PÁGINA POR PÁGINA ---
-            if modo_lectura == "Página por página":
-                if 'pagina_actual' not in st.session_state:
-                    st.session_state.pagina_actual = 0
-                
-                # Slider de navegación
-                st.slider("Selecciona Página:", 0, total_paginas - 1, key="pagina_actual")
-                
-                # Botones de navegación rápida
-                c1, c2 = st.columns(2)
-                if c1.button("⬅️ Anterior"):
-                    if st.session_state.pagina_actual > 0:
-                        st.session_state.pagina_actual -= 1
-                        st.rerun()
-                if c2.button("Siguiente ➡️"):
-                    if st.session_state.pagina_actual < total_paginas - 1:
-                        st.session_state.pagina_actual += 1
-                        st.rerun()
+            if st.button("▶️ ESCUCHAR PÁGINA (Voz Humana)", type="primary", use_container_width=True):
+                if texto and texto.strip():
+                    with st.spinner("Generando voz neural..."):
+                        ruta_audio = asyncio.run(generar_audio(texto, voz_elegida))
+                        st.audio(ruta_audio, format='audio/mp3')
+                else:
+                    st.warning("Esta página parece ser solo una imagen sin texto seleccionable.")
+        except:
+            st.error("Error al extraer texto.")
 
-                # Proceso de lectura
-                try:
-                    pagina = lector_pdf.pages[st.session_state.pagina_actual]
-                    texto_a_leer = pagina.extract_text()
-                    
-                    st.success(f"Página {st.session_state.pagina_actual + 1} lista.")
-                    
-                    with st.expander("Ver texto extraído"):
-                        st.write(texto_a_leer)
-                    
-                    if st.button("▶️ ESCUCHAR PÁGINA", type="primary", use_container_width=True):
-                        with st.spinner("Generando audio..."):
-                            audio_path = asyncio.run(generar_audio(texto_a_leer, voz_elegida))
-                            if audio_path:
-                                st.audio(audio_path, format='audio/mp3')
-                except Exception as e:
-                    st.error("Error al leer página.")
-
-            # --- MODO 2: LECTURA CONTINUA ---
-            else:
-                st.markdown("### 🎙️ Lectura de Rango")
-                c1, c2 = st.columns(2)
-                inicio = c1.number_input("Desde pág:", 1, total_paginas, 1)
-                fin = c2.number_input("Hasta pág:", 1, total_paginas, min(5, total_paginas))
-                
-                if st.button("▶️ REPRODUCIR TODO EL RANGO", type="primary", use_container_width=True):
-                    texto_completo = ""
-                    progreso = st.progress(0)
-                    with st.spinner(f"Procesando de pág {inicio} a {fin}..."):
-                        rango = range(inicio - 1, fin)
-                        for i, p in enumerate(rango):
-                            try:
-                                txt = lector_pdf.pages[p].extract_text()
-                                if txt: texto_completo += f" ... Página {p+1} ... {txt}"
-                            except: pass
-                            progreso.progress((i + 1) / len(rango))
-                    
-                    if texto_completo:
-                        audio_path = asyncio.run(generar_audio(texto_completo, voz_elegida))
-                        st.audio(audio_path, format='audio/mp3')
-                        st.success("¡Reproduciendo!")
-
-        # ==============================
-        # CASO IMAGEN
-        # ==============================
-        else:
-            # Para imagen, la imagen ya se ve a la izquierda
-            if st.button("▶️ LEER IMAGEN", type="primary"):
-                with st.spinner("Analizando imagen..."):
-                    texto = pytesseract.image_to_string(Image.open(archivo), lang='spa')
-                    if texto.strip():
-                        audio_path = asyncio.run(generar_audio(texto, voz_elegida))
-                        st.audio(audio_path, format='audio/mp3')
-                    else:
-                        st.error("No encontré texto.")
+    # 2. ES UNA IMAGEN
+    else:
+        imagen = Image.open(archivo)
+        st.image(imagen, use_container_width=True)
+        
+        if st.button("▶️ Leer Foto", type="primary", use_container_width=True):
+            with st.spinner("Analizando..."):
+                texto = pytesseract.image_to_string(imagen, lang='spa')
+                if texto.strip():
+                    ruta = asyncio.run(generar_audio(texto, voz_elegida))
+                    st.audio(ruta, format='audio/mp3')
 
 else:
-    st.info("Sube tu archivo para ver la magia.")
+    st.info("Sube un archivo para comenzar.")
