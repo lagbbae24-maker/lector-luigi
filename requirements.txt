@@ -1,5 +1,5 @@
 streamlit
 PyPDF2
-gTTS
 pytesseract
 Pillow
+edge-tts
