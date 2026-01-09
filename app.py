@@ -5,14 +5,14 @@ import pytesseract
 import edge_tts
 import asyncio
 import tempfile
-import os
+import base64
 
-# Configuración
-st.set_page_config(page_title="Lector Luigi Neural", page_icon="🧠", layout="centered")
+# Configuración de página ancha para ver mejor el PDF
+st.set_page_config(page_title="Lector Luigi Pro", page_icon="🧠", layout="wide")
 
-st.title("🧠 Lector Luigi: Voces Humanas")
+st.title("🧠 Lector Luigi: Vista Profesional")
 
-# --- BARRA LATERAL (Configuración) ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("🎛️ Configuración")
     
@@ -33,14 +33,24 @@ with st.sidebar:
     st.divider()
 
     # 2. Selector de Modo
-    st.subheader("2. Modo de Lectura")
     modo_lectura = st.radio(
-        "¿Cómo quieres leer?",
-        ["Página por página", "Lectura Continua (Todo de corrido)"],
+        "Modo de Lectura",
+        ["Página por página", "Lectura Continua"],
         index=0
     )
+    
+    st.info("ℹ️ Nota: El resaltado 'Karaoke' no es posible en esta versión web, pero aquí puedes ver el documento original para seguir la lectura.")
 
 # --- FUNCIONES ---
+
+# Función para mostrar el PDF visualmente
+def mostrar_pdf_visual(file_obj):
+    base64_pdf = base64.b64encode(file_obj.read()).decode('utf-8')
+    # Volvemos el puntero al inicio para que PyPDF2 lo pueda leer después
+    file_obj.seek(0) 
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
+
 async def generar_audio(texto, voz):
     if not texto.strip():
         return None
@@ -49,108 +59,110 @@ async def generar_audio(texto, voz):
         await comunicador.save(fp.name)
         return fp.name
 
-# --- INTERFAZ PRINCIPAL ---
+# --- INTERFAZ PRINCIPAL (Columnas) ---
+
+col_izq, col_der = st.columns([1, 1]) # Mitad y Mitad
+
+# Cargador de Archivo (Arriba de las columnas)
 archivo = st.file_uploader("📂 Sube PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
 
 if archivo is not None:
     tipo_archivo = archivo.type
     
-    # ==============================
-    # CASO PDF
-    # ==============================
-    if "pdf" in tipo_archivo:
-        lector_pdf = PyPDF2.PdfReader(archivo)
-        total_paginas = len(lector_pdf.pages)
-        st.success(f"📘 PDF cargado: {total_paginas} páginas disponibles.")
-
-        # --- MODO 1: PÁGINA POR PÁGINA ---
-        if modo_lectura == "Página por página":
-            if 'pagina_actual' not in st.session_state:
-                st.session_state.pagina_actual = 0
-            
-            # Navegación
-            st.slider("Ir a página:", 0, total_paginas - 1, key="pagina_actual")
-            
-            # Extraer texto de UNA página
-            try:
-                pagina = lector_pdf.pages[st.session_state.pagina_actual]
-                texto_a_leer = pagina.extract_text()
-                st.info(f"📖 Estás en la página {st.session_state.pagina_actual + 1}")
-                
-                with st.expander("Ver texto de esta página"):
-                    st.write(texto_a_leer)
-                
-                if st.button("▶️ Leer esta página"):
-                    with st.spinner("Generando audio..."):
-                        audio_path = asyncio.run(generar_audio(texto_a_leer, voz_elegida))
-                        if audio_path:
-                            st.audio(audio_path, format='audio/mp3')
-                        else:
-                            st.warning("Página vacía.")
-            except Exception as e:
-                st.error(f"Error leyendo página: {e}")
-
-        # --- MODO 2: LECTURA CONTINUA ---
+    # --- COLUMNA IZQUIERDA: EL DOCUMENTO VISUAL ---
+    with col_izq:
+        st.subheader("📄 Tu Documento")
+        if "pdf" in tipo_archivo:
+            mostrar_pdf_visual(archivo)
         else:
-            st.info("🎙️ Modo Continuo: Generaré un solo audio con todas las páginas que elijas.")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                inicio = st.number_input("Desde la página:", min_value=1, max_value=total_paginas, value=1)
-            with col2:
-                fin = st.number_input("Hasta la página:", min_value=1, max_value=total_paginas, value=min(5, total_paginas)) # Default a 5 pags para no saturar de inicio
-            
-            if inicio > fin:
-                st.error("La página de inicio no puede ser mayor que la final.")
-            else:
-                if st.button("▶️ Generar Audio Completo (De corrido)", type="primary"):
-                    texto_completo = ""
-                    barra_progreso = st.progress(0)
-                    
-                    # Loop para extraer texto de todas las páginas seleccionadas
-                    with st.spinner(f"Extrayendo texto de la pág {inicio} a la {fin}..."):
-                        rango_paginas = range(inicio - 1, fin)
-                        total_rango = len(rango_paginas)
-                        
-                        for i, num_pag in enumerate(rango_paginas):
-                            try:
-                                pagina = lector_pdf.pages[num_pag]
-                                txt = pagina.extract_text()
-                                if txt:
-                                    texto_completo += f"\n\n --- Página {num_pag + 1} --- \n\n" + txt
-                            except:
-                                pass
-                            # Actualizar barra
-                            barra_progreso.progress((i + 1) / total_rango)
-                    
-                    # Generar audio
-                    if texto_completo.strip():
-                        st.success(f"Texto extraído ({len(texto_completo)} caracteres). Generando voz humana, espera un momento...")
-                        try:
-                            audio_path = asyncio.run(generar_audio(texto_completo, voz_elegida))
-                            st.audio(audio_path, format='audio/mp3')
-                            st.balloons()
-                        except Exception as e:
-                            st.error(f"Error al generar audio: {e}. Intenta con menos páginas.")
-                    else:
-                        st.warning("No se encontró texto en el rango seleccionado.")
+            imagen = Image.open(archivo)
+            st.image(imagen, use_container_width=True)
 
-    # ==============================
-    # CASO IMAGEN
-    # ==============================
-    else:
-        # Imágenes siempre son "de corrido" porque es una sola cosa
-        imagen = Image.open(archivo)
-        st.image(imagen, caption="Imagen cargada", use_container_width=True)
+    # --- COLUMNA DERECHA: EL AUDIO Y TEXTO ---
+    with col_der:
+        st.subheader("🎧 Reproductor")
         
-        if st.button("▶️ Leer Imagen"):
-            with st.spinner("Leyendo imagen y generando audio..."):
-                texto = pytesseract.image_to_string(imagen, lang='spa')
-                if texto.strip():
-                    audio_path = asyncio.run(generar_audio(texto, voz_elegida))
-                    st.audio(audio_path, format='audio/mp3')
-                else:
-                    st.warning("No pude leer texto en la imagen.")
+        # ==============================
+        # CASO PDF - LÓGICA DE AUDIO
+        # ==============================
+        if "pdf" in tipo_archivo:
+            lector_pdf = PyPDF2.PdfReader(archivo)
+            total_paginas = len(lector_pdf.pages)
+            
+            # --- MODO 1: PÁGINA POR PÁGINA ---
+            if modo_lectura == "Página por página":
+                if 'pagina_actual' not in st.session_state:
+                    st.session_state.pagina_actual = 0
+                
+                # Slider de navegación
+                st.slider("Selecciona Página:", 0, total_paginas - 1, key="pagina_actual")
+                
+                # Botones de navegación rápida
+                c1, c2 = st.columns(2)
+                if c1.button("⬅️ Anterior"):
+                    if st.session_state.pagina_actual > 0:
+                        st.session_state.pagina_actual -= 1
+                        st.rerun()
+                if c2.button("Siguiente ➡️"):
+                    if st.session_state.pagina_actual < total_paginas - 1:
+                        st.session_state.pagina_actual += 1
+                        st.rerun()
+
+                # Proceso de lectura
+                try:
+                    pagina = lector_pdf.pages[st.session_state.pagina_actual]
+                    texto_a_leer = pagina.extract_text()
+                    
+                    st.success(f"Página {st.session_state.pagina_actual + 1} lista.")
+                    
+                    with st.expander("Ver texto extraído"):
+                        st.write(texto_a_leer)
+                    
+                    if st.button("▶️ ESCUCHAR PÁGINA", type="primary", use_container_width=True):
+                        with st.spinner("Generando audio..."):
+                            audio_path = asyncio.run(generar_audio(texto_a_leer, voz_elegida))
+                            if audio_path:
+                                st.audio(audio_path, format='audio/mp3')
+                except Exception as e:
+                    st.error("Error al leer página.")
+
+            # --- MODO 2: LECTURA CONTINUA ---
+            else:
+                st.markdown("### 🎙️ Lectura de Rango")
+                c1, c2 = st.columns(2)
+                inicio = c1.number_input("Desde pág:", 1, total_paginas, 1)
+                fin = c2.number_input("Hasta pág:", 1, total_paginas, min(5, total_paginas))
+                
+                if st.button("▶️ REPRODUCIR TODO EL RANGO", type="primary", use_container_width=True):
+                    texto_completo = ""
+                    progreso = st.progress(0)
+                    with st.spinner(f"Procesando de pág {inicio} a {fin}..."):
+                        rango = range(inicio - 1, fin)
+                        for i, p in enumerate(rango):
+                            try:
+                                txt = lector_pdf.pages[p].extract_text()
+                                if txt: texto_completo += f" ... Página {p+1} ... {txt}"
+                            except: pass
+                            progreso.progress((i + 1) / len(rango))
+                    
+                    if texto_completo:
+                        audio_path = asyncio.run(generar_audio(texto_completo, voz_elegida))
+                        st.audio(audio_path, format='audio/mp3')
+                        st.success("¡Reproduciendo!")
+
+        # ==============================
+        # CASO IMAGEN
+        # ==============================
+        else:
+            # Para imagen, la imagen ya se ve a la izquierda
+            if st.button("▶️ LEER IMAGEN", type="primary"):
+                with st.spinner("Analizando imagen..."):
+                    texto = pytesseract.image_to_string(Image.open(archivo), lang='spa')
+                    if texto.strip():
+                        audio_path = asyncio.run(generar_audio(texto, voz_elegida))
+                        st.audio(audio_path, format='audio/mp3')
+                    else:
+                        st.error("No encontré texto.")
 
 else:
-    st.info("Sube un archivo para comenzar.")
+    st.info("Sube tu archivo para ver la magia.")
