@@ -1,81 +1,96 @@
 import streamlit as st
 import PyPDF2
-from gtts import gTTS
 from PIL import Image
 import pytesseract
-import io
+import edge_tts
+import asyncio
+import tempfile
 
-# Configuración de la página
-st.set_page_config(page_title="Lector Luigi", page_icon="🎧", layout="centered")
+# Configuración
+st.set_page_config(page_title="Lector Luigi Neural", page_icon="🧠", layout="centered")
 
-st.title("🎧 Lector Luigi 2.0")
-st.markdown("### Lee PDFs y también Imágenes 📸")
-st.markdown("---")
+st.title("🧠 Lector Luigi: Voces Humanas")
+st.markdown("Ahora con tecnología **Neural** (No suena robotizado).")
 
-# --- LÓGICA DE LA APP ---
+# --- CONFIGURACIÓN DE VOZ ---
+st.sidebar.header("configuración de Voz")
+opcion_voz = st.sidebar.selectbox(
+    "Elige quién lee:",
+    [
+        ("es-VE-SebastianNeural", "Sebastián (Hombre - Venezuela)"),
+        ("es-MX-DaliaNeural", "Dalia (Mujer - México)"),
+        ("es-AR-TomasNeural", "Tomás (Hombre - Argentina)"),
+        ("es-ES-AlvaroNeural", "Álvaro (Hombre - España)")
+    ],
+    format_func=lambda x: x[1] # Muestra solo el nombre amigable
+)
+voz_elegida = opcion_voz[0] # El código real de la voz
 
-# 1. Subir archivo (PDF o Imagen)
-archivo = st.file_uploader("📂 Sube tu libro (PDF) o Foto (JPG/PNG)", type=["pdf", "png", "jpg", "jpeg"])
+# --- LÓGICA DE AUDIO (Función Asíncrona) ---
+async def generar_audio(texto, voz):
+    comunicador = edge_tts.Communicate(texto, voz)
+    # Crear un archivo temporal para guardar el audio
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+        await comunicador.save(fp.name)
+        return fp.name
+
+# --- INTERFAZ PRINCIPAL ---
+
+archivo = st.file_uploader("📂 Sube PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
 
 if archivo is not None:
     texto_a_leer = ""
     tipo_archivo = archivo.type
     
-    # CASO 1: Es un PDF
+    # 1. Procesar PDF
     if "pdf" in tipo_archivo:
         lector_pdf = PyPDF2.PdfReader(archivo)
         total_paginas = len(lector_pdf.pages)
-        st.success(f"📘 PDF cargado: {total_paginas} páginas.")
+        st.success(f"📘 PDF: {total_paginas} páginas.")
 
-        # Control de páginas del PDF
         if 'pagina_actual' not in st.session_state:
             st.session_state.pagina_actual = 0
             
-        st.slider("Ir a la página:", 0, total_paginas - 1, key="pagina_actual")
+        st.slider("Página:", 0, total_paginas - 1, key="pagina_actual")
         
         try:
             pagina = lector_pdf.pages[st.session_state.pagina_actual]
             texto_a_leer = pagina.extract_text()
-            st.info(f"📖 Página {st.session_state.pagina_actual + 1}")
+            st.info(f"📖 Leyendo página {st.session_state.pagina_actual + 1}")
         except:
-            st.error("Error al leer esta página del PDF.")
+            st.error("Error leyendo esta página.")
 
-    # CASO 2: Es una Imagen
+    # 2. Procesar Imagen
     else:
-        st.success("📸 Imagen cargada correctamente.")
-        # Mostrar la imagen que subió
         imagen = Image.open(archivo)
-        st.image(imagen, caption="Tu foto subida", use_container_width=True)
-        
-        # Usar los "ojos" (OCR) para leer el texto
-        with st.spinner("👀 Luigi está leyendo la imagen..."):
+        st.image(imagen, caption="Tu foto", use_container_width=True)
+        with st.spinner("👀 Extrayendo texto..."):
             try:
-                # Extraer texto de la imagen (en español)
                 texto_a_leer = pytesseract.image_to_string(imagen, lang='spa')
-            except Exception as e:
-                st.error("Error: No pude leer el texto. Asegúrate de haber creado el archivo 'packages.txt'.")
+            except:
+                st.error("Error de OCR. Revisa 'packages.txt'.")
 
-    # --- MOSTRAR Y LEER EL TEXTO (Común para ambos) ---
-    
+    # --- REPRODUCTOR NEURAL ---
     if texto_a_leer:
-        with st.expander("Ver texto detectado", expanded=True):
+        with st.expander("Ver texto"):
             st.write(texto_a_leer)
             
-        if st.button("▶️ Escuchar texto", type="primary", use_container_width=True):
+        if st.button("▶️ Narrar con voz humana", type="primary", use_container_width=True):
             if texto_a_leer.strip():
-                with st.spinner("Procesando voz..."):
+                with st.spinner("Generando voz neural... (esto toma unos segundos)"):
                     try:
-                        tts = gTTS(text=texto_a_leer, lang='es')
-                        audio_bytes = io.BytesIO()
-                        tts.write_to_fp(audio_bytes)
-                        audio_bytes.seek(0)
-                        st.audio(audio_bytes, format='audio/mp3')
+                        # Ejecutar la función asíncrona
+                        archivo_audio = asyncio.run(generar_audio(texto_a_leer, voz_elegida))
+                        
+                        # Reproducir
+                        st.audio(archivo_audio, format='audio/mp3')
+                        st.success("¡Audio generado con éxito!")
                     except Exception as e:
-                        st.error(f"Error de audio: {e}")
+                        st.error(f"Error: {e}")
             else:
-                st.warning("No encontré texto legible. ¿La imagen está borrosa?")
+                st.warning("No hay texto para leer.")
     else:
-        st.warning("No se pudo extraer texto. Intenta con otra página o foto.")
+        st.warning("No se detectó texto.")
 
 else:
-    st.info("Sube un archivo para comenzar.")
+    st.info("Sube un archivo para probar las nuevas voces.")
