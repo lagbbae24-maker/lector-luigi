@@ -29,8 +29,8 @@ try:
         pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
         os.environ['TESSDATA_PREFIX'] = r'C:\Program Files\Tesseract-OCR\tessdata'
     else:
-        # En la nube de Linux (Streamlit Cloud), Tesseract y sus paquetes se leen de forma global
-        pass
+        # Ruta estándar para el servidor Linux de Streamlit Cloud
+        pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
         
     TIENE_OCR = True
 except ImportError:
@@ -66,7 +66,7 @@ st.markdown("""
 }
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: #0B1120; }
-::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: #0B1120; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #3B82F6; }
 </style>
 """, unsafe_allow_html=True)
