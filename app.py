@@ -1,167 +1,594 @@
+"""
+Lector Luigi | Estudio Pro — v8.0 (RESTAURADO)
+Version estable. Sin CSS inyectado conflictivo.
+Tema oscuro via .streamlit/config.toml
+"""
+
 import streamlit as st
 import PyPDF2
-try:
-    from pdf2image import convert_from_bytes
-    TIENE_VISUALIZADOR = True
-except ImportError:
-    TIENE_VISUALIZADOR = False
-
-from PIL import Image
-import pytesseract
-import edge_tts
+import re
+import io
 import asyncio
 import tempfile
-import io
+import os
+import unicodedata
+from typing import Optional
 
-# Configuración
-st.set_page_config(page_title="Lector Luigi Pro", page_icon="🎧", layout="wide")
+try:
+    import fitz
+    TIENE_FITZ = True
+except ImportError:
+    TIENE_FITZ = False
 
-st.title("🎧 Lector Luigi: Visualización y Audio")
+try:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    from PIL import Image as PILImage
+    TIENE_OCR = True
+except ImportError:
+    TIENE_OCR = False
 
-# --- GESTIÓN DE MEMORIA ---
-if 'audio_actual' not in st.session_state:
-    st.session_state.audio_actual = None
-if 'pagina_vista' not in st.session_state:
-    st.session_state.pagina_vista = 0
+import edge_tts
 
-# --- BARRA LATERAL (Solo Configuración) ---
-with st.sidebar:
-    st.header("🎛️ Configuración")
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Lector Luigi | Estudio Pro",
+    page_icon="📖",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSS MÍNIMO — solo fondo y scrollbar, sin tocar widgets nativos
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+.stApp { background-color: #0B1120; }
+.block-container { padding-top: 2rem !important; max-width: 1360px !important; }
+#MainMenu, footer, header { visibility: hidden; }
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: #1E2D45 !important;
+    border-radius: 14px !important;
+}
+.stProgress > div > div > div {
+    background: linear-gradient(90deg, #1E40AF, #3B82F6) !important;
+    border-radius: 999px !important;
+}
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: #0B1120; }
+::-webkit-scrollbar-thumb { background: #1E293B; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3B82F6; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────────────────────────────────────
+for _k, _v in {
+    "audio_actual":   None,
+    "audio_label":    "",
+    "pagina_vista":   0,
+    "pdf_cargado_id": None,
+    "total_paginas":  0,
+}.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CATÁLOGO DE VOCES
+# ─────────────────────────────────────────────────────────────────────────────
+VOCES = [
+    ("Sebastian — Venezuela",  "es-VE-SebastianNeural"),
+    ("Dalia — Mexico",         "es-MX-DaliaNeural"),
+    ("Alvaro — Espana",        "es-ES-AlvaroNeural"),
+    ("Tomas — Argentina",      "es-AR-TomasNeural"),
+    ("Jorge — Mexico",         "es-MX-JorgeNeural"),
+    ("Elvira — Espana",        "es-ES-ElviraNeural"),
+    ("Elena — Argentina",      "es-AR-ElenaNeural"),
+    ("Gonzalo — Colombia",     "es-CO-GonzaloNeural"),
+    ("Salome — Colombia",      "es-CO-SalomeNeural"),
+    ("Camila — Peru",          "es-PE-CamilaNeural"),
+    ("Alonso — EEUU",          "es-US-AlonsoNeural"),
+]
+VOCES_DICT = {lbl: vid for lbl, vid in VOCES}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NORMALIZACIÓN DE TEXTO
+# ─────────────────────────────────────────────────────────────────────────────
+def normalizar(raw: str) -> str:
+    t = unicodedata.normalize("NFKC", raw)
     
-    opcion_voz = st.selectbox(
-        "Narrador:",
-        [
-            ("es-VE-SebastianNeural", "Sebastián (Vzla - Calmado)"),
-            ("es-MX-DaliaNeural", "Dalia (Mex - Profesional)"),
-            ("es-ES-AlvaroNeural", "Álvaro (Esp - Profundo)"),
-            ("es-AR-TomasNeural", "Tomás (Arg - Suave)"),
-        ],
-        format_func=lambda x: x[1]
-    )
-    voz_elegida = opcion_voz[0]
+    # ── NUEVAS REGLAS: Limpieza de HTML y artefactos OCR ──
+    # 1. Eliminar etiquetas HTML genéricas (ej: <p>, </div>, <br/>)
+    t = re.sub(r'<[^>]+>', ' ', t)
+    # 2. Eliminar restos aislados de cierres de párrafo como "/p" o "</p>"
+    t = re.sub(r'(?i)</?p>|/p\b', ' ', t)
+    # 3. Eliminar llaves y corchetes (comunes en e-books mal convertidos o código)
+    t = re.sub(r'[\[\]\{\}]', ' ', t)
+    
+    # ── Reglas originales de limpieza ──
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", t)
+    t = re.sub("[\uf000-\uffff]", "", t)
+    t = re.sub(r"\(cid:\d+\)", "", t)
+    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
+    
+    MARCA = "\u00b6"
+    t = re.sub(r"\n{2,}", MARCA, t)
+    mayus = "ABCDEFGHIJKLMNOPQRSTUVWXYZ\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
+    t = re.compile("([.?!])\n([" + re.escape(mayus) + "])").sub(r"\1" + MARCA + r"\2", t)
+    t = re.sub(r"\n", " ", t)
+    t = t.replace(MARCA, "\n\n")
+    t = re.sub(r"([.?!,;:])([^\s\n])", r"\1 \2", t)
+    t = re.sub(r"(?m)^\s*\d{1,4}\s*$", "", t)
+    
+    # 4. Colapsar espacios múltiples resultantes de los borrados
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
 
-    velocidad = st.slider("Velocidad:", -50, 50, -10, format="%d%%")
-    tasa_str = f"{velocidad:+d}%"
 
-# --- FUNCIÓN AUDIO ---
-async def generar_audio(texto, voz, tasa):
-    if not texto.strip(): return None
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIONES CACHEADAS
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, max_entries=3)
+def indexar_pdf(pdf_bytes: bytes):
+    reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+    total  = len(reader.pages)
+    return total, []
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def renderizar_pagina(pdf_bytes: bytes, pag_0: int) -> Optional[bytes]:
+    if not TIENE_FITZ:
+        return None
     try:
-        comunicador = edge_tts.Communicate(texto, voz, rate=tasa)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if pag_0 < len(doc):
+            pagina_pdf = doc.load_page(pag_0)
+            pix = pagina_pdf.get_pixmap(dpi=150)
+            return pix.tobytes("png")
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def ocr_pagina(pdf_bytes: bytes, pag_0: int) -> str:
+    """Versión cacheada — solo para páginas donde OCR ya funciona correctamente."""
+    if not (TIENE_FITZ and TIENE_OCR):
+        return ""
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if pag_0 < len(doc):
+            pagina_pdf = doc.load_page(pag_0)
+            pix = pagina_pdf.get_pixmap(dpi=150)
+            img = PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            return pytesseract.image_to_string(img, lang="spa") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def ocr_pagina_diagnostico(pdf_bytes: bytes, pag_0: int):
+    """
+    Versión NO cacheada con diagnóstico completo.
+    Retorna: (texto: str, error: str | None)
+    Si error no es None, el OCR falló y error contiene el mensaje exacto.
+    """
+    if not TIENE_FITZ:
+        return "", (
+            "PyMuPDF no está instalado.\n"
+            "Ejecuta: pip install PyMuPDF"
+        )
+    if not TIENE_OCR:
+        return "", (
+            "pytesseract no está instalado.\n"
+            "Ejecuta: pip install pytesseract\n"
+            "Y descarga Tesseract OCR desde: https://github.com/UB-Mannheim/tesseract/wiki"
+        )
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if pag_0 >= len(doc):
+            return "", "La página solicitada no existe en el documento."
+        pagina_pdf = doc.load_page(pag_0)
+        pix = pagina_pdf.get_pixmap(dpi=150)
+        img = PILImage.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    except Exception as ex:
+        nombre = type(ex).__name__
+        msg    = str(ex)
+        return "", f"Error al renderizar PDF con PyMuPDF — {nombre}: {msg}"
+
+    try:
+        texto = pytesseract.image_to_string(img, lang="spa") or ""
+        return texto, None
+    except pytesseract.TesseractNotFoundError:
+        return "", (
+            "Tesseract no está en el PATH del sistema.\n"
+            "Descárgalo desde: https://github.com/UB-Mannheim/tesseract/wiki\n"
+            "Después agrega su carpeta de instalación al PATH de Windows."
+        )
+    except Exception as ex:
+        return "", f"Error en OCR — {type(ex).__name__}: {ex}"
+
+
+def obtener_texto(pdf_bytes, idx, textos_cache):
+    ocr_raw = ocr_pagina(pdf_bytes, idx)
+    return normalizar(ocr_raw), bool(ocr_raw.strip())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SÍNTESIS DE VOZ
+# ─────────────────────────────────────────────────────────────────────────────
+async def _tts(texto: str, voz: str, tasa: str, pitch: str) -> Optional[bytes]:
+    if not texto.strip():
+        return None
+    try:
+        texto_limpio = texto.strip()
+        com = edge_tts.Communicate(texto_limpio, voice=voz, rate=tasa, pitch=pitch)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-            await comunicador.save(fp.name)
-            return fp.name
-    except Exception as e:
-        st.error(f"Error: {e}")
+            ruta = fp.name
+        await com.save(ruta)
+        with open(ruta, "rb") as f:
+            data = f.read()
+        os.unlink(ruta)
+        return data
+    except Exception as ex:
+        st.error(f"Error TTS: {ex}")
         return None
 
-# --- APP PRINCIPAL ---
-archivo = st.file_uploader("📂 Sube tu PDF o Imagen", type=["pdf", "png", "jpg", "jpeg"])
 
-if archivo is not None:
-    # Definimos columnas: Izquierda (Visual) | Derecha (Audio y Controles)
-    col_izq, col_der = st.columns([1, 1])
-    archivo_bytes = archivo.read()
-    
-    # ==================== CASO PDF ====================
-    if "pdf" in archivo.type:
-        lector_pdf = PyPDF2.PdfReader(io.BytesIO(archivo_bytes))
-        total_paginas = len(lector_pdf.pages)
-        
-        # --- COLUMNA IZQUIERDA: VISUALIZACIÓN ---
-        with col_izq:
-            st.subheader("👁️ Visualizador")
-            
-            # Botones de navegación (Visual)
-            c_ant, c_info, c_sig = st.columns([1, 2, 1])
-            with c_ant:
-                if st.button("⬅️", use_container_width=True):
-                    if st.session_state.pagina_vista > 0:
-                        st.session_state.pagina_vista -= 1
-                        st.rerun()
-            with c_sig:
-                if st.button("➡️", use_container_width=True):
-                    if st.session_state.pagina_vista < total_paginas - 1:
-                        st.session_state.pagina_vista += 1
-                        st.rerun()
-            with c_info:
-                st.markdown(f"<div style='text-align: center; font-weight: bold;'>Página {st.session_state.pagina_vista + 1}</div>", unsafe_allow_html=True)
+def generar_audio(texto, voz, tasa, pitch) -> Optional[bytes]:
+    return asyncio.run(_tts(texto, voz, tasa, pitch))
 
-            # Imagen de la página
-            if TIENE_VISUALIZADOR:
-                try:
-                    imgs = convert_from_bytes(
-                        archivo_bytes,
-                        first_page=st.session_state.pagina_vista + 1,
-                        last_page=st.session_state.pagina_vista + 1
-                    )
-                    if imgs:
-                        st.image(imgs[0], use_container_width=True)
-                except:
-                    st.warning("Visualización no disponible.")
 
-        # --- COLUMNA DERECHA: REPRODUCTOR Y GENERADOR ---
-        with col_der:
-            st.subheader("🎧 Reproductor")
-            
-            # 1. EL REPRODUCTOR (Siempre visible arriba)
-            st.markdown("---")
-            if st.session_state.audio_actual:
-                st.audio(st.session_state.audio_actual, format='audio/mp3')
-                st.success("✅ Audio cargado. Dale Play.")
-            else:
-                st.info("Genera un audio abajo para escuchar.")
-            st.markdown("---")
+# ═════════════════════════════════════════════════════════════════════════════
+#  INTERFAZ
+# ═════════════════════════════════════════════════════════════════════════════
 
-            # 2. GENERADOR (Controles)
-            st.write("📖 **Crear nuevo audio**")
-            
-            # Usamos el estado de visualización como sugerencia de inicio
-            pg_inicio = st.session_state.pagina_vista + 1
-            
-            c1, c2 = st.columns(2)
-            inicio = c1.number_input("Desde pág:", 1, total_paginas, value=pg_inicio)
-            fin = c2.number_input("Hasta pág:", 1, total_paginas, value=min(pg_inicio + 5, total_paginas))
-            
-            if st.button("▶️ GENERAR AUDIO", type="primary", use_container_width=True):
-                if inicio > fin:
-                    st.error("Error en rango.")
-                else:
-                    texto_completo = ""
-                    barra = st.progress(0)
-                    rango = range(inicio - 1, fin)
-                    
-                    with st.spinner("Procesando..."):
-                        for i, p in enumerate(rango):
-                            try:
-                                txt = lector_pdf.pages[p].extract_text()
-                                if txt: texto_completo += f"\n... Pág {p+1} ...\n{txt}"
-                            except: pass
-                            barra.progress((i + 1) / len(rango))
-                    
-                    if texto_completo.strip():
-                        ruta = asyncio.run(generar_audio(texto_completo, voz_elegida, tasa_str))
-                        if ruta:
-                            st.session_state.audio_actual = ruta # Guardamos en memoria
-                            st.rerun() # Recargamos para que aparezca arriba
-                    else:
-                        st.warning("No hay texto.")
+# ── 1. HEADER ─────────────────────────────────────────────────────────────────
+st.title("📖 Lector Luigi · Estudio Pro")
+st.caption("Síntesis de voz neural · OCR automático · v8.0")
+st.divider()
 
-    # ==================== CASO IMAGEN ====================
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.image(archivo, use_container_width=True)
-        with c2:
-            if st.button("▶️ LEER FOTO", type="primary"):
-                txt = pytesseract.image_to_string(Image.open(archivo), lang='spa')
-                if txt:
-                    ruta = asyncio.run(generar_audio(txt, voz_elegida, tasa_str))
-                    st.session_state.audio_actual = ruta
+# ── 2. PANEL DE VOZ (expander nativo) ─────────────────────────────────────────
+with st.expander("🎙️  Configuración de Voz y Prosodia", expanded=True):
+
+    c1, c2, c3 = st.columns([1.4, 1, 1], gap="medium")
+
+    with c1:
+        st.markdown("**Narrador**")
+        voz_label = st.selectbox(
+            "Voz",
+            [v[0] for v in VOCES],
+            label_visibility="collapsed",
+        )
+        voz_id   = VOCES_DICT[voz_label]
+        narrador = voz_label.split(" — ")[0]
+
+    with c2:
+        st.markdown("**Velocidad de Lectura**")
+        velocidad = st.slider(
+            "Velocidad",
+            min_value=-50, max_value=50, value=-8, step=1,
+            format="%d%%",
+            label_visibility="collapsed",
+            help="Recomendado −8 % a −20 % para lectura natural",
+        )
+        tasa_str = f"{velocidad:+d}%"
+        st.caption(
+            f"**{tasa_str}** — "
+            + ("Natural ✓" if -20 <= velocidad <= 5 else
+               ("Muy lenta" if velocidad < -20 else "Rápida"))
+        )
+
+    with c3:
+        st.markdown("**Tono (Pitch)**")
+        pitch_val = st.slider(
+            "Pitch",
+            min_value=-20, max_value=20, value=0, step=1,
+            format="%d Hz",
+            label_visibility="collapsed",
+            help="0 Hz = tono original de la voz seleccionada",
+        )
+        pitch_str = f"{pitch_val:+d}Hz"
+        st.caption(
+            f"**{pitch_str}** — "
+            + ("Original" if pitch_val == 0 else
+               ("Grave ▼" if pitch_val < 0 else "Agudo ▲"))
+        )
+
+st.write("")
+
+# ── 3. SUBIDA DE ARCHIVO ──────────────────────────────────────────────────────
+with st.container(border=True):
+    archivo = st.file_uploader(
+        "Sube tu PDF o imagen de trabajo",
+        type=["pdf", "png", "jpg", "jpeg"],
+        help="PDF, PNG, JPG · Hasta 200 MB",
+    )
+
+st.write("")
+
+# ── 4. BIENVENIDA (sin archivo) ───────────────────────────────────────────────
+if archivo is None:
+    with st.container(border=True):
+        st.write("")
+        _, centro, _ = st.columns([1, 2, 1])
+        with centro:
+            st.markdown("## 📂")
+            st.markdown("#### Sube un documento para comenzar")
+            st.caption(
+                "PDF o imagen · El audio persiste mientras navegas las páginas"
+            )
+        st.write("")
+    st.stop()
+
+# ── 5. CARGA Y DETECCIÓN DE CAMBIO ───────────────────────────────────────────
+archivo_bytes = archivo.read()
+file_id       = hash(archivo_bytes)
+tam_mb        = round(len(archivo_bytes) / 1_048_576, 1)
+
+if st.session_state.pdf_cargado_id != file_id:
+    st.session_state.pdf_cargado_id = file_id
+    st.session_state.pagina_vista   = 0
+    st.session_state.audio_actual   = None
+    st.session_state.audio_label    = ""
+    st.session_state.total_paginas  = 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RAMA PDF
+# ═════════════════════════════════════════════════════════════════════════════
+if "pdf" in archivo.type:
+
+    with st.spinner("Indexando documento…"):
+        total, textos = indexar_pdf(archivo_bytes)
+
+    st.session_state.total_paginas = total
+    pag = min(st.session_state.pagina_vista, total - 1)
+    st.session_state.pagina_vista  = pag
+
+    if tam_mb > 15 or total > 80:
+        st.warning(
+            f"⚠️ Archivo grande ({tam_mb} MB · {total} páginas). "
+            "Genera el audio en bloques de ≤ 10 páginas."
+        )
+        st.write("")
+
+    # ── DOBLE COLUMNA ─────────────────────────────────────────────────────────
+    col_visor, col_audio = st.columns([1.1, 1.0], gap="large")
+
+    # ── COLUMNA IZQUIERDA: VISOR ──────────────────────────────────────────────
+    with col_visor:
+        with st.container(border=True):
+
+            st.markdown("### 👁 Visor del Documento")
+
+            nav1, nav2, nav3 = st.columns([1, 2, 1])
+            with nav1:
+                if st.button("← Anterior", key="ant", use_container_width=True,
+                             disabled=(pag == 0)):
+                    st.session_state.pagina_vista = pag - 1
                     st.rerun()
-            
-            if st.session_state.audio_actual:
-                st.audio(st.session_state.audio_actual, format='audio/mp3')
+            with nav2:
+                st.markdown(
+                    f"<div style='text-align:center;font-weight:700;font-size:0.9rem;"
+                    f"color:#60A5FA;padding:6px 0;border:1.5px solid #1E2D45;"
+                    f"border-radius:999px;background:#0F172A'>"
+                    f"Página {pag + 1} de {total}</div>",
+                    unsafe_allow_html=True,
+                )
+            with nav3:
+                if st.button("Siguiente →", key="sig", use_container_width=True,
+                             disabled=(pag >= total - 1)):
+                    st.session_state.pagina_vista = pag + 1
+                    st.rerun()
 
+            st.write("")
+
+            txt_pag, uso_ocr = obtener_texto(archivo_bytes, pag, textos)
+            if uso_ocr:
+                st.caption("🔍 OCR aplicado automáticamente en esta página")
+
+            img = renderizar_pagina(archivo_bytes, pag)
+            if img:
+                st.image(img, use_container_width=True)
+            else:
+                st.markdown(
+                    f"<div style='font-size:0.85rem;color:#94A3B8;line-height:1.75;"
+                    f"white-space:pre-wrap;max-height:560px;overflow-y:auto;"
+                    f"padding:0.5rem 0'>"
+                    f"{txt_pag or 'Sin contenido extraíble en esta página.'}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── COLUMNA DERECHA: ESTUDIO DE AUDIO ────────────────────────────────────
+    with col_audio:
+
+        # Reproductor persistente
+        with st.container(border=True):
+            st.markdown("### 📻 Reproductor")
+            if st.session_state.audio_actual:
+                st.success(f"▶  {st.session_state.audio_label}")
+                st.audio(st.session_state.audio_actual, format="audio/mp3")
+            else:
+                st.write("")
+                _, mc, _ = st.columns([1, 3, 1])
+                with mc:
+                    st.markdown("**🎵  Sin audio generado**")
+                    st.caption("Configura el rango y pulsa Generar")
+                st.write("")
+
+        st.write("")
+
+        # Generador de audio
+        with st.container(border=True):
+            st.markdown("### ⚙️ Generar Audio")
+
+            g1, g2 = st.columns(2)
+            desde = g1.number_input(
+                "Desde página", 1, total, value=pag + 1, key="desde"
+            )
+            hasta = g2.number_input(
+                "Hasta página", 1, total,
+                value=min(pag + 10, total), key="hasta"
+            )
+
+            if hasta - desde + 1 > 10:
+                st.warning("Rango mayor a 10 páginas puede tardar varios minutos.")
+
+            st.write("")
+            st.caption(
+                f"Voz: **{narrador}**  ·  "
+                f"Velocidad: **{tasa_str}**  ·  Tono: **{pitch_str}**"
+            )
+
+            btn_gen = st.button(
+                "🎙️  Generar Audio",
+                type="primary",
+                use_container_width=True,
+                key="btn_gen",
+            )
+
+        st.write("")
+
+        # Información del documento
+        with st.expander("📊 Estadísticas del documento"):
+            col_s1, col_s2 = st.columns(2)
+            col_s1.metric("Páginas", total)
+            col_s2.metric("Tamaño", f"{tam_mb} MB")
+            st.caption(
+                "Modo 100% OCR activo. La capa de texto original es ignorada para evitar basura HTML."
+            )
+
+    # ── LÓGICA DE GENERACIÓN ──────────────────────────────────────────────────
+    if btn_gen:
+        if desde > hasta:
+            st.error("La página inicial no puede superar a la final.")
+        else:
+            acum, con_ocr, errores_ocr = "", [], []
+            rango  = list(range(desde - 1, hasta))
+            prog   = st.progress(0)
+            estado = st.empty()
+
+            # ── Verificación previa de OCR ──────
+            estado.info("🔍 Verificando estado del motor OCR…")
+            _, error_previo = ocr_pagina_diagnostico(archivo_bytes, rango[0])
+            if error_previo:
+                prog.empty()
+                estado.empty()
+                st.error(
+                    f"**❌ El OCR no está disponible o tiene un error de configuración:**\n\n"
+                    f"{error_previo}"
+                )
+                st.stop()
+
+            # ── Extracción página a página usando 100% OCR ────────────────────
+            for i, p in enumerate(rango):
+                estado.info(f"⏳ Extrayendo página {p + 1} de {hasta} (Forzando OCR)…")
+
+                texto_ocr, error_ocr = ocr_pagina_diagnostico(archivo_bytes, p)
+                if error_ocr:
+                    errores_ocr.append((p + 1, error_ocr))
+                elif texto_ocr.strip():
+                    # Limpieza básica para unir líneas rotas propias del OCR
+                    texto_ocr = re.sub(r'([^\.\!\?])\n([^\n])', r'\1 \2', texto_ocr)
+                    acum += normalizar(texto_ocr) + "\n\n"
+                    con_ocr.append(p + 1)
+
+                prog.progress((i + 1) / len(rango))
+
+            prog.empty()
+            estado.empty()
+
+            # ── Mostrar errores de OCR si los hubo ────────────────────────────
+            if errores_ocr:
+                pags_err = [str(pn) for pn, _ in errores_ocr]
+                _, primer_err = errores_ocr[0]
+                st.error(
+                    f"**❌ OCR falló en {len(errores_ocr)} página(s): {', '.join(pags_err)}**\n\n"
+                    f"{primer_err}"
+                )
+
+            if con_ocr:
+                st.info(f"🔍 Lectura 100% OCR aplicada en {len(con_ocr)} página(s).")
+
+            if acum.strip():
+                with st.spinner("🎙️ Sintetizando voz…"):
+                    audio = generar_audio(acum, voz_id, tasa_str, pitch_str)
+                if audio:
+                    st.session_state.audio_actual = audio
+                    st.session_state.audio_label  = (
+                        f"Págs {desde}–{hasta} · {narrador} (100% OCR)"
+                    )
+                    st.rerun()
+            elif not errores_ocr:
+                st.warning(
+                    "No se detectó texto legible por OCR en ese rango."
+                )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RAMA IMAGEN
+# ═════════════════════════════════════════════════════════════════════════════
 else:
-    st.info("Sube un archivo para comenzar.")
+    col_i, col_a = st.columns([1, 1], gap="large")
+
+    with col_i:
+        with st.container(border=True):
+            st.markdown("### 🖼 Imagen")
+            if TIENE_OCR:
+                st.image(PILImage.open(io.BytesIO(archivo_bytes)), use_container_width=True)
+            else:
+                st.image(archivo_bytes, use_container_width=True)
+
+    with col_a:
+        with st.container(border=True):
+            st.markdown("### 📻 Reproductor")
+            if st.session_state.audio_actual:
+                st.success(f"▶  {st.session_state.audio_label}")
+                st.audio(st.session_state.audio_actual, format="audio/mp3")
+            else:
+                st.write("")
+                st.markdown("**🎵  Sin audio generado**")
+                st.caption("Pulsa el botón de abajo para leer la imagen")
+                st.write("")
+
+        st.write("")
+
+        with st.container(border=True):
+            st.markdown("### 🎙️ Leer Imagen")
+            st.caption(
+                f"Voz: **{narrador}** · Vel: **{tasa_str}** · Tono: **{pitch_str}**"
+            )
+            st.write("")
+            if TIENE_OCR:
+                if st.button("🎙️  Leer imagen con OCR", type="primary",
+                             use_container_width=True, key="btn_img"):
+                    with st.spinner("Extrayendo texto de la imagen…"):
+                        try:
+                            raw_img   = pytesseract.image_to_string(
+                                PILImage.open(io.BytesIO(archivo_bytes)), lang="spa"
+                            )
+                            texto_img = normalizar(raw_img)
+                        except Exception as ex:
+                            st.error(f"Error OCR: {ex}")
+                            texto_img = ""
+                    if texto_img:
+                        with st.spinner("🎙️ Sintetizando…"):
+                            audio = generar_audio(texto_img, voz_id, tasa_str, pitch_str)
+                        if audio:
+                            st.session_state.audio_actual = audio
+                            st.session_state.audio_label  = f"Imagen · {narrador}"
+                            st.rerun()
+                    else:
+                        st.warning("No se detectó texto legible en la imagen.")
+            else:
+                st.warning(
+                    "Instala `pytesseract` y Tesseract OCR para habilitar esta función."
+                )
